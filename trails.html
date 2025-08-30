@@ -1,0 +1,477 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8"/>
+    <title>Trails</title>
+
+    <!-- leaflet API -->
+    <script src="https://unpkg.com/leaflet@latest/dist/leaflet.js"></script>
+    <link href="https://unpkg.com/leaflet@latest/dist/leaflet.css" rel="stylesheet"/>
+
+    <style>
+    .full {
+        position: fixed;
+        left:0;
+        top: 0;
+        height: 100%;
+        width: 100%;
+    }
+	
+	.draw {
+		cursor: crosshair;
+	}
+
+    .layerctrldiv {
+        width: 1em;
+        height: 1em;
+        border-radius: 1em;
+        display: inline-block;
+        margin-right: 1px;
+    }
+
+    .circle {
+        height: 1em;
+        width: 1em;
+        border-radius: 50%;
+        display: inline-block;
+        text-align: center;
+        border: 1px solid black;
+        user-select: none;
+    }
+    </style>
+</head>
+<body>
+    <div id="mapframe" class="full" style="z-index: 0;"></div>
+    <div style="position: relative; z-index: 100;">
+      <i
+        class="circle"
+        title="Keys:&#10;N - New path&#10;O - Open path&#10;S - Save path&#10;E - Edit last path&#10;Enter - Finish path (SHIFT: set path color)&#10;Back/Delete - Remove last path segment&#10;Space - Move along path (SHIFT: keep centered)&#10;ALT +/- - Adjust movement speed&#10;Escape - Stop moving/delete unfinished path&#10;D - Show distances&#10;&#10;Mouse:&#10;Left click: Add path segment&#10;Right click: Remove path segment&#10;Scroll: Zoom&#10;Drag: Move map (SHIFT: Zoom to selection)">
+        i
+      </i>
+    </div>
+</body>
+</html>
+
+<script>
+    // *** MovingMarker and other icons *** //
+    L.MovingMarker = L.Marker.extend({
+
+        //options: {
+            //speed: 0.1, // km/s
+            //keepCentered: false,
+        //},
+
+        initialize: function(latlngs, options){
+            // create marker
+            this._latlngs = latlngs.map(ll => L.latLng(ll));
+            L.Marker.prototype.initialize.call(this, this._latlngs[0], options);
+            this._moving = false;
+            this._target = null;
+        },
+
+        move: function(){
+            // move marker along (single-line) path
+            this.stop();
+
+            if (this._latlngs.length > 1) {
+                // still sections to go: travel next section in straight line
+                this._start = this._latlng;
+                this._target = this._latlngs[1];
+                let distance = this._start.distanceTo(this._target);
+                this._duration = distance / this.options.speed; // seconds
+
+                // start animation
+                this._moving = true;
+                this._animId = L.Util.requestAnimFrame(function(timestamp) {
+                    this._startTime = Date.now();
+                    this._startTimeStamp = timestamp;
+                    this._animate(timestamp);
+                }, this, true);
+                this._animRequested = true;
+            }
+            else
+            {
+                // finished: disappear
+                this.remove(_map);
+                // remove from markers dictionary
+               delete(_markers[this.options.name]);
+            }
+        },
+
+        stop: function(t){
+            // stop moving
+
+            if(!this._moving)
+                return;
+
+            if (this._animRequested) {
+                // cancel animation(s)
+                L.Util.cancelAnimFrame(this._animId);
+                this._animRequested = false;
+            }
+
+            if(typeof(t) === 'undefined'){
+                let elapsedTime = Date.now() - this._startTime;
+                this._animate(this._startTimeStamp + elapsedTime, true);
+            }
+            this._moving = false;
+            this._target = null;
+        },
+
+        _animate: function(ts, noRequestAnim){
+            // helper function to show movement
+
+            this._animRequested = false;
+            var elapsedTime = ts - this._startTimeStamp;
+
+            if(elapsedTime > this._duration){
+                this.stop(ts);
+                // part finished: start next part
+                this._latlngs.shift();
+                this.move();
+                return;
+            }
+
+            if(!this._moving)
+                return;
+
+            if(elapsedTime != null){
+                // compute next position (linear equation)
+                let k = elapsedTime / this._duration;
+                k = (k>0)?k:0;
+                k = (k<1)?k:1;
+                p1= this._start;
+                p2= this._target;
+                lat = p1.lat + k * (p2.lat - p1.lat);
+                lng = p1.lng + k * (p2.lng - p1.lng);
+                latlng = L.latLng(lat, lng);
+                this.setLatLng(latlng);
+                if (this.options.keepCentered)
+                    _map.setView(latlng);
+            }
+
+            if(!noRequestAnim){
+                this._animId = L.Util.requestAnimFrame(this._animate, this, false);
+                this._animRequested = true;
+            }
+        }
+
+    })
+
+    L.movingMarker = function(latlng, options) {
+        return new L.MovingMarker(latlng, options);
+    }
+
+    L.colorIcon = function(color) {
+        // create a colored map marker
+        color = color || '#FFFFFF';
+        const div = new L.divIcon({
+            className : '',
+            iconAnchor: [0, 24],
+            labelAnchor: [-6, 0],
+            popupAnchor: [0, -36],
+            tooltipAnchor: [0, -36],
+            html: '<span style="background-color: ' + color + '; width: 2rem; height: 2rem; display: block; left: -1rem; top: -1rem; position: relative; border-radius: 2rem 2rem 0; transform: rotate(45deg); border: 1px solid #000000"/>'
+        });
+        return div;
+    }
+
+    // *** map *** //
+
+    const MAX_ZOOM = 18; // maximum map zoom (in)
+
+    _map = L.map('mapframe', {zoomControl: true});
+
+    // set zoom control position in map
+    _map.zoomControl.setPosition('topright');
+
+    // add map scale
+    L.control.scale({imperial: false, position: 'bottomright'}).addTo(_map);
+
+    // various attribution links
+    const osmLink = '<a href="https://openstreetmap.org">OpenStreetMap</a>';
+    const gisLink = 'Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community';
+
+    // base layers
+    const osm_base_layer = L.tileLayer(
+        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: 'Tiles &copy; ' + osmLink + ' Contributors',
+            maxZoom: Math.min(19, MAX_ZOOM),
+        }).addTo(_map);
+
+    const gis_base_layer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+        attribution: 'Tiles &copy; ' + gisLink,
+        maxZoom: Math.min(19, MAX_ZOOM)
+    });
+
+    const baseLayers = {
+        'OpenStreetMap': osm_base_layer,
+        'GIS Satellite': gis_base_layer,
+    };
+    // layer control to toggle base maps and overlays
+    const layerCtrl = L.control.layers(baseLayers,null).addTo(_map);
+
+    // init: show Germany
+    _map.fitBounds([[55, 5.5],[47, 15]]);
+
+    var _path = null; // holds path while drawing
+    var _paths = {}; // name -> path
+    var _pathName = ""; // current/last path name
+    var _markers = {}; // all markers on map
+    var _markerSpeed = 1; // how fast do markers move? km/s(?)
+
+    // key listener
+    _map.on('keydown', e => {
+        // are there markers still moving?
+        let moving = markersMoving();
+
+        switch(e.originalEvent.key) {
+            // general functionality
+            case 'n':
+                // new path
+                if(_path){
+                    alert("Still drawing!");
+                    break;
+                }
+                _pathName = prompt("Path name");
+                if(_pathName){
+                    if (_pathName in _paths){
+                        alert("Path name already exists");
+                        break;
+                    }
+                    _path = L.polyline([], {
+                        color: 'orange',
+                        interactive: false
+                    }).addTo(_map);
+					document.getElementById("mapframe").classList.add("draw");
+                }
+                break;
+            case 'o':
+                // open local file
+                // create dummy file input
+                const input = document.createElement('input');
+                input.setAttribute('type', 'file');
+                input.setAttribute('accept', '.geojson');
+                input.style.display = 'none';
+                document.body.appendChild(input);
+                input.onchange = _ => {
+                    if (input.files && input.files[0]){
+                        const reader = new FileReader();
+                        reader.onload = function(e) {
+                            const contents = e.target.result;
+                            const collection = JSON.parse(contents);
+                            const features = collection.features;
+                            for (const feature of features){
+                                var coords = feature.geometry.coordinates;
+                                // lnglat -> latlng
+                                coords = coords.map(c => [c[1], c[0]]);
+                                const path = L.polyline(coords, {
+                                    color:feature.properties.color||'green',
+                                    interactive: false,
+                                }).addTo(_map);
+                                pathName = feature.properties.name;
+                                if(pathName in _paths){
+                                    // layer of same name exists: remove old
+                                    layerCtrl._layers.forEach(l => {
+                                        if(l.overlay && l.name == pathName){
+                                            layerCtrl.removeLayer(l.layer);
+                                            l.layer.remove();
+                                        }
+                                    });
+                                }
+                                _paths[pathName] = path;
+                                // add round div with color of path to path name in layer control
+                                let displayName = '<div class="layerctrldiv" style="background-color: ' + feature.properties.color + ';"></div>' + pathName;
+                                layerCtrl.addOverlay(path, displayName);
+                            }
+                            // compute bounds of all paths, fit into window
+                            _map.fitBounds(L.featureGroup(Object.values(_paths)).getBounds())
+                        };
+                        reader.readAsText(input.files[0]);
+                    }
+                };
+                // click on dummy input, so file selection dialogue opens
+                input.click();
+                // remove dummy input
+                document.body.removeChild(input);
+                break;
+            case 's':
+                // save _paths
+                let features = [];
+                for (const [name, path] of Object.entries(_paths)) {
+                    const feature = path.toGeoJSON();
+                    feature.properties['name'] = name;
+                    feature.properties['color'] = path.options.color;
+                    features.push(feature);
+                }
+                const collection = {'type': 'FeatureCollection', 'features': features};
+
+                // create dummy link
+                const element = document.createElement('a');
+                element.setAttribute('href', 'data:text/plain;charset=utf-8,' + encodeURIComponent(JSON.stringify(collection)));
+                element.setAttribute('download', 'trails.geojson');
+                element.style.display = 'none';
+                document.body.appendChild(element);
+                // click dummy link -> download dialogue opens
+                element.click();
+                document.body.removeChild(element);
+                break;
+			case 'd':
+				// report distance
+				let descArr = [];
+				for (let [name, path] of Object.entries(_paths)) {
+					let pathLen = getLineLength(path);
+					if (pathLen < 10000)  // show distance in meters for paths shorter than 10km 
+						descArr.push(name + ': ' + pathLen.toFixed() + ' m');
+					else
+						descArr.push(name + ': ' + (pathLen / 1000).toFixed(1) + ' km');
+				}
+				alert(descArr.sort().join('\n'));  // sort paths by name, display one path per line
+            // drawing
+            case 'Backspace':
+            case 'Delete':
+                // remove last path section
+                removeLastPathSection();
+                break;
+            case 'Enter':
+                // finish path
+                if(_path){
+                    // remove first coordinate (double)
+                    let coords = _path.getLatLngs();
+                    if ((coords.length > 2) && (coords[0] == coords[1]))
+                        coords = coords.slice(1, coords.length);
+                    _path.setLatLngs(coords);
+
+                    if (coords.length > 0){
+                        // path not empty: change color, add to layer control
+                        let color = e.originalEvent.shiftKey?prompt('color') || 'green':'green';
+                        _path.setStyle({color: color});
+
+                        if(!(_pathName in _paths)){
+                            _paths[_pathName] = _path;
+                            layerCtrl.addOverlay(_path, _pathName);
+                        }
+                    }
+                }
+                _path = null;
+				document.getElementById("mapframe").classList.remove("draw");
+                break;
+            case 'e':
+                // edit last path
+                _path = _paths[_pathName];
+                if (_path)
+                    _path.setStyle({color: 'orange'});
+                break;
+            case 'Escape':
+                // markers: remove
+                for(const m of Object.values(_markers)){
+                    m.stop();
+                    m.remove(_map);
+                }
+                _markers = [];
+                // abandon path
+                if(_path){
+                    _path.remove();
+                    _path = null;
+					document.getElementById("mapframe").classList.remove("draw");
+                }
+                break;
+            // movement
+            case ' ':
+                // space: move marker
+
+                // stop all current markers
+                for(const m of Object.values(_markers))
+                    m.stop();
+
+                // generate new moving marker for all visible overlays
+                // (only if no prior markers present or stopped)
+                layerCtrl._layers.forEach(l => {
+                    if(l.overlay && _map.hasLayer(l.layer) && !moving){
+                        if(!(l.name in _markers)){
+                            // new layer: generate new marker
+                            const m = L.movingMarker(l.layer.getLatLngs(), {
+                                icon: L.colorIcon(l.layer.options.color),
+                                interactive: false,
+                                speed: _markerSpeed,
+                                keepCentered: e.originalEvent.shiftKey,
+                                name: l.name,
+                            }).addTo(_map);
+                            _markers[l.name] = m;
+                        }
+                        // move all path markers
+                        _markers[l.name].move();
+                    }
+                });
+                break;
+            case '+':
+                // increase speed (double)
+                if(e.originalEvent.altKey)
+                    _markerSpeed *= 4;
+            case '-':
+                // decrease speed
+                if(e.originalEvent.altKey){
+                    _markerSpeed /= 2;
+                    for (const m of Object.values(_markers)){
+                        m.stop();
+                        m.options.speed = _markerSpeed;
+                        if(moving)
+                            m.move();
+                    }
+                }
+                break;
+        }
+    });
+
+    _map.on('click', e => {
+        if(_path){
+            // drawing mode: add section to path
+            if(_path.isEmpty()){
+                // add first point twice to show on map
+                _path.addLatLng(e.latlng);
+            }
+            _path.addLatLng(e.latlng);
+            _path.redraw();
+        }
+        else
+            console.log(e.latlng);
+		console.log(e);
+		e.originalEvent.preventDefault();
+    });
+	_map.on('contextmenu', removeLastPathSection);
+	
+	function removeLastPathSection() {
+		if(_path && !_path.isEmpty()){
+			let coords = _path.getLatLngs();
+			if((coords.length == 2) && (coords[0] == coords[1]))
+				coords = [];
+			else
+				coords = coords.slice(0, coords.length - 1);
+			_path.setLatLngs(coords);
+			_path.redraw();
+		}
+	}
+
+    function getNiceColor(minimum=0){
+        let r = Math.floor(Math.random() * (0xFF - minimum + 1)) + minimum;
+        let g = Math.floor(Math.random() * (0xFF - minimum + 1)) + minimum;
+        let b = Math.floor(Math.random() * (0xFF - minimum + 1)) + minimum;
+        let color = (r << 16) + (g << 8) + b;
+        return ('00' + color.toString(16)).slice(-6);
+    }
+
+    function markersMoving(){
+        // helper: are there any markers moving?
+        return Object.values(_markers).reduce((a,m) => a || m._moving, false);
+    }
+
+    function getLineLength(layer){
+        // get length of PolyLine layer in meters
+        let latlngs = layer.getLatLngs();
+        let distance = 0;
+        for (let i = 1; i < latlngs.length; i++)
+            distance += latlngs[i].distanceTo(latlngs[i - 1]);
+        return distance;
+    }
+    // Object.entries(_paths).forEach(x => console.log(x[0], getLineLength(x[1])));
+</script>
