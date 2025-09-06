@@ -45,7 +45,7 @@
     <div style="position: relative; z-index: 100;">
       <i
         class="circle"
-        title="Keys:&#10;N - New path&#10;O - Open path&#10;S - Save path&#10;E - Edit last path&#10;Enter - Finish path (SHIFT: set path color)&#10;Back/Delete - Remove last path segment&#10;Space - Move along path (SHIFT: keep centered)&#10;ALT +/- - Adjust movement speed&#10;Escape - Stop moving/delete unfinished path&#10;D - Show distances&#10;&#10;Mouse:&#10;Left click: Add path segment&#10;Right click: Remove path segment&#10;Scroll: Zoom&#10;Drag: Move map (SHIFT: Zoom to selection)">
+        title="Keys:&#10;N - New path&#10;O - Open path&#10;S - Save path&#10;E - Edit last path&#10;P - Toggle Preview&#10;Enter - Finish path (SHIFT: set path color)&#10;Back/Delete - Remove last path segment&#10;Space - Move along path (SHIFT: keep centered)&#10;ALT +/- - Adjust movement speed&#10;Escape - Stop moving/delete unfinished path&#10;D - Show distances&#10;&#10;Mouse:&#10;Left click - Add path segment&#10;Right click - Remove path segment&#10;Scroll - Zoom&#10;Drag - Move map (SHIFT: Zoom to selection)">
         i
       </i>
     </div>
@@ -219,6 +219,8 @@
     var _pathName = ""; // current/last path name
     var _markers = {}; // all markers on map
     var _markerSpeed = 1; // how fast do markers move? km/s(?)
+	var _preview = true;
+	var _previewSection = null;
 
     // key listener
     _map.on('keydown', e => {
@@ -316,6 +318,11 @@
                 element.click();
                 document.body.removeChild(element);
                 break;
+			case 'p':
+				// toggle preview
+				_preview = !_preview;
+				updatePreview();
+				break;
 			case 'd':
 				// report distance
 				let descArr = [];
@@ -354,11 +361,13 @@
                     }
                 }
                 _path = null;
+				updatePreview();
 				document.getElementById("mapframe").classList.remove("draw");
                 break;
             case 'e':
                 // edit last path
                 _path = _paths[_pathName];
+				updatePreview();
                 if (_path)
                     _path.setStyle({color: 'orange'});
                 break;
@@ -373,6 +382,7 @@
                 if(_path){
                     _path.remove();
                     _path = null;
+					updatePreview();
 					document.getElementById("mapframe").classList.remove("draw");
                 }
                 break;
@@ -435,9 +445,14 @@
         }
         else
             console.log(e.latlng);
-		console.log(e);
 		e.originalEvent.preventDefault();
     });
+	
+	_map.on('mousemove', e => {
+		updatePreview(e.latlng);
+	});
+	
+	// right click: remove last section
 	_map.on('contextmenu', removeLastPathSection);
 	
 	function removeLastPathSection() {
@@ -449,7 +464,33 @@
 				coords = coords.slice(0, coords.length - 1);
 			_path.setLatLngs(coords);
 			_path.redraw();
+			updatePreview();
 		}
+	}
+	
+	function updatePreview(newLatLng=null) {
+		if (!_preview || !_path || _path.isEmpty() || !newLatLng) {
+			// no preview or no path to preview
+			if (_previewSection) {
+				// remove old preview
+				_previewSection.remove();
+				_previewSection = null;
+			}
+			return;
+		}
+		// show next segment preview
+		let pathCoords = _path.getLatLngs();
+		let lastPathCoords = pathCoords[pathCoords.length - 1];
+		if (!_previewSection) {
+			_previewSection = L.polyline([], {
+				color: 'orange',
+				opacity: 0.75,
+				dashArray: '6',
+				interactive: false,
+			}).addTo(_map);
+		}
+		_previewSection.setLatLngs([lastPathCoords, newLatLng]);
+		_previewSection.redraw();
 	}
 
     function getNiceColor(minimum=0){
